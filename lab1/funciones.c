@@ -48,8 +48,8 @@ pid_t eliminar_proceso(pid_t p_ant, pid_t p_post){
  * Salidas:
  * Descripcion: Envia el token al siguiente proceso mediante una señal.
 */
-void enviar(pid_t pid, union sigval value, int sig){
-	//value.sival_int = token; // Asigna el token ( valor de ejemplo)
+void enviar(pid_t pid, int token, int sig){
+	value.sival_int = token; // Asigna el token ( valor de ejemplo)
 	if (sigqueue(pid, sig, value) == -1) {
 		perror("sigqueue");
 		exit(EXIT_FAILURE);
@@ -61,6 +61,12 @@ void enviar(pid_t pid, union sigval value, int sig){
  * Salidas:
  * Descripcion: Reenlaza los procesos correspondientes al eliminar uno.
 */
+void eliminar_proceso(pid_t p_ant, pid_t p_post){
+	enviar(p_ant,-1,SIGUSR1);
+	enviar(p_post,-2,SIGUSR1);
+	enviar(p_ost,p_ant,SIGUSR2);
+	enviar(p_ant,p_post,SIGUSR2);
+}
 
 /* Entradas:
  * Salidas:
@@ -74,7 +80,7 @@ void extraer_pid(int sig, siginfo_t * si, void *context)
 	//token_recibido = si->si_value.sival_int;
 	
 	//printf(" Proceso %d recibio el token : %d\n", getpid(), token);
-	pid_aux = si->si_pid;	//
+	pid_aux = (pid_t) si->si_value.sival_int;	//
 }
 
 void extraer_token(int sig, siginfo_t * si, void *context){
@@ -141,32 +147,42 @@ pid_t crear_hijo(pid_t inicio, pid_t * final,int num_id){
 	pid_t pid = fork();
 	int enlazado=0;
 	if(pid == 0){
-		//while?
+	    while(1){
 		if(enlanzado == 0){
 			if(num_id != 0){
 				p_ant = inicio;
 				if(final != NULL){//caso final
 					p_post = *final;
-					enviar(p_post,SOY_ANT,SIGUSR2);
+					enviar(p_post,getpid(),SIGUSR2);
 				}
 				else{
 					recibir(SIGUSR2,extraer_pid);
 					p_post = p_aux;
 				} 
 				//avisar al anterior
-				enviar(p_ant,SOY_POST,SIGUSR2);
+				enviar(p_ant,getpid(),SIGUSR2);
 				//enlace(p_post);
 			}
 			else{//si es el primero
 				recibir(SIGUSR2,extraer_pid);
 				p_ant = p_aux;
-				enviar(p_ant,SOY_POST,SIGUSR2);
+				enviar(p_ant,getpid(),SIGUSR2);
 				recibir(SIGUSR2,extraer_pid);
 				p_post = p_aux;
 			}
 			enlazado=1;
 		}
+		else{ //reenlazar
+			recibir(SIGUSR2,extraer_pid);
+			p_ant = p_aux;
+			enviar(p_ant,getpid(),SIGUSR2);
+			recibir(SIGUSR2,extraer_pid);
+			p_post = p_aux;
+		}
 		recibir(SIGUSR1,extraer_token);
+		if(token_recibido == -1){
+			continue; //reiniciar
+		}
 		token = token_recibido;
 		enviar(p_ant,RECIBIDO,SIGUSR2);
 		token = desafio_random(token);
@@ -177,6 +193,7 @@ pid_t crear_hijo(pid_t inicio, pid_t * final,int num_id){
 		else{
 			eliminar_proceso(p_ant,p_post);
 		}
+	    }
 	}
 	else if(pid < 0){
 		//fprintf(stderr, "E1:Error al crear fork!\n");
