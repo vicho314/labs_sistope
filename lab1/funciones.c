@@ -4,25 +4,10 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
-#define SOY_POST 0
-#define SOY_ANT 1
-#define RECIBIDO 2
-
 volatile sig_atomic_t token_recibido = 0;
-volatile pid_t pid_aux_global;
-/*
-* Manejador de senales que procesa la senal SIGUSR1 .
-* Se utiliza SA_SIGINFO para acceder a la informacion adicional enviada con
-senal.
-*/
-void manejador(int sig, siginfo_t * si, void *context)
-{
-	// Extrae el token enviado a traves del campo sival_int de la union
-	// sigval.
-	int token = si->si_value.sival_int;
-	printf(" Proceso %d recibio el token : %d\n", getpid(), token);
-	token_recibido = 1;	// Indica que la senal ha sido recibida .
-}
+volatile pid_t p_aux = 0;
+volatile pid_t p_ant = 0;
+volatile pid_t p_post = 0;
 
 /* Entradas:
  * Salidas:
@@ -31,17 +16,6 @@ void manejador(int sig, siginfo_t * si, void *context)
 int desafio_random(int token, int M){
 	//return token - (int)(drand48() * M);
 	return token - (rand() % M); 
-}
-
-/* Entradas:
- * Salidas:
- * Descripcion: Elimina el proceso y se notifica a los demás 
- * procesos su salida.
-*/
-pid_t eliminar_proceso(pid_t p_ant, pid_t p_post){
-	notificar_anterior(p_post);
-	notificar_posterior(p_ant);
-	salir();
 }
 
 /* Entradas:
@@ -62,10 +36,19 @@ void enviar(pid_t pid, int token, int sig){
  * Descripcion: Reenlaza los procesos correspondientes al eliminar uno.
 */
 void eliminar_proceso(pid_t p_ant, pid_t p_post){
-	enviar(p_ant,-1,SIGUSR1);
-	enviar(p_post,-2,SIGUSR1);
-	enviar(p_ost,p_ant,SIGUSR2);
-	enviar(p_ant,p_post,SIGUSR2);
+	if( (p_ant == p_post) && (p_post != getpid())){
+		enviar(getppid(),p_ant,SIGUSR2);//enviar ganador
+		enviar(getppid(),GANADOR,SIGUSR1);
+	}
+	else{
+		enviar(p_ant,-1,SIGUSR1);
+		enviar(p_post,-2,SIGUSR1);
+		enviar(p_ant,p_post,SIGUSR2);
+		enviar(p_post,p_ant,SIGUSR2);
+		enviar(getppid(),p_ant,SIGUSR2);
+		enviar(getppid(),NO_GANADOR,SIGUSR1);
+	}
+	exit(0);
 }
 
 /* Entradas:
@@ -80,36 +63,40 @@ void extraer_pid(int sig, siginfo_t * si, void *context)
 	//token_recibido = si->si_value.sival_int;
 	
 	//printf(" Proceso %d recibio el token : %d\n", getpid(), token);
-	pid_aux = (pid_t) si->si_value.sival_int;	//
+	p_aux = (pid_t) si->si_value.sival_int;	//
 }
 
+/* Entradas:
+ * Salidas:
+ * Descripcion: Maneja la senal que recibe el token de algun proceso
+*/
 void extraer_token(int sig, siginfo_t * si, void *context){
 	// Extrae el token enviado a traves del campo sival_int de la union
 	// sigval.
 	token_recibido = si->si_value.sival_int;
-	printf("Proceso %d recibio el token : %d\n", getpid(), token_recibido);
+	printf("\nProceso %d; Token rec: %d ; ", getpid(), token_recibido);
+	enviar(p_ant,RECIBIDO,SIGUSR2);
+	token = desafio_random(token,M);
+	printf("Token resultante: %d ;", token);
+	if(token >= 0){
+		enviar(p_post,token,SIGUSR1);
+		recibir(SIGUSR2,extraer_pid);//esperar confirmacion
+	}
+	else{
+		printf("(P. eliminado)");
+		eliminar_proceso(p_ant,p_post);
+	}
 }
+
+
 
 /* Entradas:
  * Salidas:
- * Descripcion: Recibe el pid del siguiente proceso
+ * Descripcion: Asigna la accion a una señal
 */
-typedef void (*sigaction_f)(int, siginfo_t *, void *);
-pid_t recibir(int sig,sigaction_f accion ){
-	sigset_t oldmask;
-	oldmask = asignar_signal(sig,accion);
-	sigsuspend(&oldmask);
-	return p_aux;
-}
-
-/* Entradas:
- * Salidas:
- * Descripcion: Asigna las mascaras de una señal, y la bloquea
-*/
-
-sigset_t asignar_signal(int sig, sigaction_f accion){
+void asignar_signal(int sig, sigaction_f accion){
 	struct sigaction sa;
-	sigset_t mask, oldmask;
+	//sigset_t mask, oldmask;
 
 	// Configuracion del manejador para SIGUSR1 .
 	sa.sa_flags = SA_SIGINFO;	// Permite acceder a informacion
@@ -121,20 +108,50 @@ sigset_t asignar_signal(int sig, sigaction_f accion){
 		perror("sigaction");
 		exit(EXIT_FAILURE);
 	}
-	// Bloquea SIGUSR1 para evitar su entrega prematura .
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGUSR1);
-	if (sigprocmask(SIG_BLOCK, &mask, &oldmask) < 0) {
-		perror("sigprocmask");
-		exit(EXIT_FAILURE);
-	}
-	return oldmask; //para volver a activar
 }
 
 /* Entradas:
  * Salidas:
- * Descripcion: Elige un lider y reinicializa el token.
+ * Descripcion: Bloquea una señal
 */
+sigset_t bloquear(int sig,sigset_t * mask, sigset_t * oldmask){
+	// Bloquea SIGUSR1 para evitar su entrega prematura .
+	sigemptyset(mask);
+	sigaddset(mask, sig);
+	if (sigprocmask(SIG_BLOCK, mask, oldmask) < 0) {
+		perror("sigprocmask");
+		exit(EXIT_FAILURE);
+	}
+	//*new_mask = mask; 
+	return *oldmask; //para volver a activar
+
+}
+/* Entradas:
+ * Salidas:
+ * Descripcion: Desbloquea una señal
+*/
+void desbloquear(int sig){
+	sigset_t mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, sig);
+	sigprocmask(SIG_UNBLOCK, &mask, NULL);
+}
+
+/* Entradas:
+ * Salidas:
+ * Descripcion: Recibe la señal y la desbloquea
+*/
+//typedef void (*sigaction_f)(int, siginfo_t *, void *);
+pid_t recibir(int sig, sigaction_f accion,int block){
+	sigset_t oldmask,mask;
+	asignar_signal(sig,accion,&mask);
+	oldmask = bloquear(sig,&mask,&oldmask);
+	sigsuspend(&oldmask);
+	if(block == 0){
+		sigprocmask (SIG_UNBLOCK, &mask, NULL);
+	}
+	return p_aux;
+}
 
 /* Entradas:
  * Salidas:
@@ -142,8 +159,10 @@ sigset_t asignar_signal(int sig, sigaction_f accion){
  * al proceso anterior y proceso posterior. El proceso queda esperando
  * a la señal del token para ejecutar el desafio random.
 */
-pid_t crear_hijo(pid_t inicio, pid_t * final,int num_id){
-	pid_t p_post, p_ant;
+pid_t crear_hijo(pid_t inicio,int num_id, int M){
+	//pid_t p_post, p_ant;
+	sigset_t mask, oldmask;
+	bloquear(SIGUSR2,mask,oldmask);
 	pid_t pid = fork();
 	int enlazado=0;
 	if(pid == 0){
@@ -151,12 +170,12 @@ pid_t crear_hijo(pid_t inicio, pid_t * final,int num_id){
 		if(enlanzado == 0){
 			if(num_id != 0){
 				p_ant = inicio;
-				if(final != NULL){//caso final
+				if(num_id == -1){//caso final
 					p_post = *final;
 					enviar(p_post,getpid(),SIGUSR2);
 				}
 				else{
-					recibir(SIGUSR2,extraer_pid);
+					recibir(SIGUSR2,extraer_pid,1);
 					p_post = p_aux;
 				} 
 				//avisar al anterior
@@ -164,34 +183,33 @@ pid_t crear_hijo(pid_t inicio, pid_t * final,int num_id){
 				//enlace(p_post);
 			}
 			else{//si es el primero
-				recibir(SIGUSR2,extraer_pid);
+				recibir(SIGUSR2,extraer_pid,1);
 				p_ant = p_aux;
 				enviar(p_ant,getpid(),SIGUSR2);
-				recibir(SIGUSR2,extraer_pid);
+				recibir(SIGUSR2,extraer_pid,1);
 				p_post = p_aux;
 			}
 			enlazado=1;
 		}
-		else{ //reenlazar
+		/*
+		else if (token_recibido != -1 && token_recibido != -2){ //reenlazar
 			recibir(SIGUSR2,extraer_pid);
 			p_ant = p_aux;
 			enviar(p_ant,getpid(),SIGUSR2);
 			recibir(SIGUSR2,extraer_pid);
 			p_post = p_aux;
-		}
-		recibir(SIGUSR1,extraer_token);
+		}*/	
+		//bloquear(SIGUSR2,&mask,&oldmask);
+		recibir(SIGUSR1,extraer_token,1);
 		if(token_recibido == -1){
+			recibir(SIGUSR2,extraer_pid,1);
+			p_post = p_aux;
 			continue; //reiniciar
 		}
-		token = token_recibido;
-		enviar(p_ant,RECIBIDO,SIGUSR2);
-		token = desafio_random(token);
-		if(token >= 0){
-			enviar_token(p_post,token,SIGUSR1);
-			recibir(SIGUSR2,extraer_pid);//esperar confirmacion
-		}
-		else{
-			eliminar_proceso(p_ant,p_post);
+		if(token_recibido == -2){
+			recibir(SIGUSR2,extraer_pid,1);
+			p_ant = p_aux;
+			continue; //reiniciar
 		}
 	    }
 	}
@@ -207,5 +225,53 @@ pid_t crear_hijo(pid_t inicio, pid_t * final,int num_id){
 /* Entradas:
  * Salidas:
  * Descripcion: Crea N procesos hijos, los enlaza entre sí y 
- * los deja esperando.
+ * los deja esperando. Asigna el lider en cada iteracion, y recibe el ganador.
 */
+//pid_t prometeo
+pid_t crear_desafio(int P, int token_i, int M){
+	int i,j,respuesta;
+	sigset_t mask, mask2, oldmask, ublock1, ublock2;
+	pid_t pid, primero;
+	pid=0;
+	bloquear(SIGUSR1,&mask, &mask2);
+	ublock2 = mask;
+	sigaddset(&ublock2,SIGUSR2);
+	bloquear(SIGUSR2,&mask2,NULL);
+	ublock1 = mask2;
+	sigaddset(SIGUSR2,&ublock1);
+	for(i=0; i < P; ++i){
+		if( (i + 1) == P){
+			pid = crear_hijo(pid,-1,M);
+		}
+		else{
+			pid = crear_hijo(pid,i,M);
+			if(i==0){
+				primero=pid;
+			}
+		}
+	}
+	printf("Todos los hijos han sido creados.\n");
+	enviar(pid,primero,SIGUSR2);
+	j=0;
+	respuesta=0;
+	//Esperar al ganador
+	while(1){
+		printf("");
+		if(respuesta != GANADOR){
+			enviar(pid,token_i,SIGUSR1);//quitar deadlock
+			//recibir(SIGUSR2,extraer_pid,-1);
+			asignar_signal(SIGUSR2,extraer_pid);
+			sigsuspend(&ublock2);
+			pid = p_aux;//recibir lider
+			//recibir(SIGUSR1,extraer_token,-1);
+			asignar_signal(SIGUSR1,extraer_token);
+			sigsuspend(&ublock1);
+			respuesta = token_recibido;
+		}
+		else{
+			printf("El ganador es %d.\n", pid);
+			break;
+		}
+	}
+	return pid;
+}
